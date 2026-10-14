@@ -29,10 +29,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 from zoneinfo import ZoneInfo
 
-TOKEN = os.environ.get("WHATSAPP_TOKEN", "")
-PHONE_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "")
-VERIFY = os.environ.get("WHATSAPP_VERIFY_TOKEN", "")
-SECRETO = os.environ.get("WHATSAPP_APP_SECRET", "")
+TOKEN = os.environ.get("WHATSAPP_TOKEN", "").strip()
+PHONE_ID = os.environ.get("WHATSAPP_PHONE_NUMBER_ID", "").strip()
+VERIFY = os.environ.get("WHATSAPP_VERIFY_TOKEN", "").strip()
+SECRETO = os.environ.get("WHATSAPP_APP_SECRET", "").strip()
+WABA_ID = os.environ.get("WHATSAPP_WABA_ID", "1649530216617131").strip()  # cuenta de WhatsApp Business
 RITMO = float(os.environ.get("DEMO_RITMO", "1"))
 try:
     MADRID = ZoneInfo("Europe/Madrid")
@@ -62,6 +63,9 @@ NO = {"no", "sigue", "todavia", "aun", "nada", "igual"}
 _estados = {}
 _bloqueo = threading.Lock()
 _vistos = deque(maxlen=2000)
+DIAGNOSTICO = {"arranque": datetime.now(MADRID).isoformat(timespec="seconds"), "avisos_meta": 0,
+               "ultimo_aviso_meta": None, "mensajes_recibidos": 0, "envios_ok": 0, "ultimo_error_envio": None,
+               "suscripcion": None, "numero": None, "apps_suscritas": None}
 
 
 def normal(t):
@@ -94,10 +98,42 @@ def enviar(tel, texto):
                                                "Content-Type": "application/json"}, method="POST")
     try:
         urllib.request.urlopen(peticion, timeout=20).read()
+        DIAGNOSTICO["envios_ok"] += 1
     except urllib.error.HTTPError as e:
-        print(f"[whatsapp] Error {e.code}: {e.read().decode(errors='ignore')}", flush=True)
+        error = e.read().decode(errors="ignore")
+        DIAGNOSTICO["ultimo_error_envio"] = f"{e.code}: {error[:500]}"
+        print(f"[whatsapp] Error {e.code}: {error}", flush=True)
     except urllib.error.URLError as e:
-        print(f"[whatsapp] Sin conexión: {e}")
+        DIAGNOSTICO["ultimo_error_envio"] = f"sin conexión: {e}"
+        print(f"[whatsapp] Sin conexión: {e}", flush=True)
+
+
+def graph(metodo, ruta):
+    """Llamada a la API de Meta; devuelve la respuesta (o el error) como diccionario."""
+    peticion = urllib.request.Request(f"https://graph.facebook.com/v21.0/{ruta}", method=metodo,
+                                      data=b"" if metodo == "POST" else None,
+                                      headers={"Authorization": f"Bearer {TOKEN}"})
+    try:
+        return json.loads(urllib.request.urlopen(peticion, timeout=20).read() or b"{}")
+    except urllib.error.HTTPError as e:
+        try:
+            return {"error_http": e.code, **json.loads(e.read() or b"{}")}
+        except ValueError:
+            return {"error_http": e.code}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+def preparar_whatsapp():
+    """Al arrancar: suscribe la cuenta de WhatsApp a esta app (si no, Meta no avisa de los mensajes)."""
+    if not (TOKEN and WABA_ID):
+        return
+    DIAGNOSTICO["suscripcion"] = graph("POST", f"{WABA_ID}/subscribed_apps")
+    DIAGNOSTICO["apps_suscritas"] = graph("GET", f"{WABA_ID}/subscribed_apps")
+    if PHONE_ID:
+        DIAGNOSTICO["numero"] = graph("GET", f"{PHONE_ID}?fields=display_phone_number,verified_name,"
+                                             "code_verification_status,quality_rating,platform_type")
+    print(f"[demo] Suscripción a WhatsApp: {DIAGNOSTICO['suscripcion']}", flush=True)
 
 
 def marcar_leido(mensaje_id):
@@ -338,6 +374,7 @@ def procesar(carga):
                     continue
                 _vistos.append(m.get("id"))
                 tel = m["from"]
+                DIAGNOSTICO["mensajes_recibidos"] += 1
                 print(f"[demo] Mensaje recibido de …{tel[-4:]} ({m.get('type')})", flush=True)
                 marcar_leido(m.get("id"))
                 tipo = m.get("type")
@@ -373,6 +410,15 @@ class Manejador(BaseHTTPRequestHandler):
             if q.get("hub.mode") == "subscribe" and VERIFY and q.get("hub.verify_token") == VERIFY:
                 return self._fin(200, q.get("hub.challenge", "").encode())
             return self._fin(403, b"Token de verificacion incorrecto")
+        if url.path == "/diagnostico":
+            if not VERIFY or q.get("clave") != VERIFY:
+                return self._fin(403, b"Falta la clave")
+            if q.get("resuscribir"):
+                preparar_whatsapp()
+            datos = dict(DIAGNOSTICO, token_configurado=bool(TOKEN), phone_id=PHONE_ID, waba_id=WABA_ID,
+                         conversaciones=len(_estados))
+            return self._fin(200, json.dumps(datos, ensure_ascii=False, indent=1).encode(),
+                             "application/json; charset=utf-8")
         if url.path in ("/privacidad", "/privacy"):
             return self._fin(200, PRIVACIDAD.encode(), "text/html; charset=utf-8")
         estado = "conectado a WhatsApp" if TOKEN and PHONE_ID else "SIN configurar (faltan variables)"
@@ -394,6 +440,8 @@ class Manejador(BaseHTTPRequestHandler):
             if not hmac.compare_digest(firma, self.headers.get("X-Hub-Signature-256", "")):
                 return self._fin(401)
         self._fin(200, b"ok")  # Meta exige respuesta rápida
+        DIAGNOSTICO["avisos_meta"] += 1
+        DIAGNOSTICO["ultimo_aviso_meta"] = datetime.now(MADRID).isoformat(timespec="seconds")
         print(f"[demo] Aviso de Meta recibido ({len(cuerpo)} bytes)", flush=True)
         try:
             carga = json.loads(cuerpo or b"{}")
@@ -408,6 +456,7 @@ class Manejador(BaseHTTPRequestHandler):
 def main():
     puerto = int(os.environ.get("PORT", "8020"))
     print(f"Demo de averías escuchando en el puerto {puerto} · WhatsApp {'conectado' if TOKEN else 'NO configurado (modo consola)'}", flush=True)
+    threading.Thread(target=preparar_whatsapp, daemon=True).start()
     ThreadingHTTPServer(("0.0.0.0", puerto), Manejador).serve_forever()
 
 
