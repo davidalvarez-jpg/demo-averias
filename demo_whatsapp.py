@@ -95,7 +95,7 @@ def enviar(tel, texto):
     try:
         urllib.request.urlopen(peticion, timeout=20).read()
     except urllib.error.HTTPError as e:
-        print(f"[whatsapp] Error {e.code}: {e.read().decode(errors='ignore')}")
+        print(f"[whatsapp] Error {e.code}: {e.read().decode(errors='ignore')}", flush=True)
     except urllib.error.URLError as e:
         print(f"[whatsapp] Sin conexión: {e}")
 
@@ -306,6 +306,28 @@ def factura(e):
 
 # ---------- Servidor ----------
 
+CONTACTO = os.environ.get("DEMO_CONTACTO", "david.alvarez@alumni.mondragon.edu")
+PRIVACIDAD = f"""<!doctype html><html lang="es"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Política de privacidad · Averías Hostelería (demo)</title>
+<body style="font:17px/1.55 system-ui,sans-serif;max-width:40em;margin:0 auto;padding:24px;color:#17201d">
+<h1>Política de privacidad</h1>
+<p><b>Averías Hostelería</b> es una demostración de un servicio de reparación de maquinaria para hostelería
+por WhatsApp. No presta servicios reales ni envía técnicos.</p>
+<h2>Qué datos tratamos</h2>
+<p>Solo el número de teléfono, el nombre de perfil de WhatsApp y los mensajes que nos envías durante la demo.</p>
+<h2>Para qué</h2>
+<p>Únicamente para responderte dentro de la demostración. No usamos tus datos para publicidad ni los cedemos
+a terceros, salvo a Meta Platforms (WhatsApp), que transmite los mensajes.</p>
+<h2>Cuánto tiempo</h2>
+<p>La conversación se guarda solo en la memoria temporal del servidor y se borra al reiniciarse, como mucho
+en unas horas. No se guarda en ninguna base de datos.</p>
+<h2>Tus derechos</h2>
+<p>Puedes pedir información o la eliminación de tus datos escribiendo a <b>{CONTACTO}</b>, o escribir
+<b>reiniciar</b> en el chat para borrar la conversación de la demo.</p>
+<p style="color:#5b6662">Última actualización: 14 de octubre de 2026.</p>
+</body></html>"""
+
 def procesar(carga):
     for entrada in carga.get("entry", []):
         for cambio in entrada.get("changes", []):
@@ -316,6 +338,7 @@ def procesar(carga):
                     continue
                 _vistos.append(m.get("id"))
                 tel = m["from"]
+                print(f"[demo] Mensaje recibido de …{tel[-4:]} ({m.get('type')})", flush=True)
                 marcar_leido(m.get("id"))
                 tipo = m.get("type")
                 if tipo == "text":
@@ -350,6 +373,8 @@ class Manejador(BaseHTTPRequestHandler):
             if q.get("hub.mode") == "subscribe" and VERIFY and q.get("hub.verify_token") == VERIFY:
                 return self._fin(200, q.get("hub.challenge", "").encode())
             return self._fin(403, b"Token de verificacion incorrecto")
+        if url.path in ("/privacidad", "/privacy"):
+            return self._fin(200, PRIVACIDAD.encode(), "text/html; charset=utf-8")
         estado = "conectado a WhatsApp" if TOKEN and PHONE_ID else "SIN configurar (faltan variables)"
         html = (f"<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
                 f"<body style='font:18px system-ui;padding:24px;max-width:30em'>"
@@ -369,6 +394,7 @@ class Manejador(BaseHTTPRequestHandler):
             if not hmac.compare_digest(firma, self.headers.get("X-Hub-Signature-256", "")):
                 return self._fin(401)
         self._fin(200, b"ok")  # Meta exige respuesta rápida
+        print(f"[demo] Aviso de Meta recibido ({len(cuerpo)} bytes)", flush=True)
         try:
             carga = json.loads(cuerpo or b"{}")
         except ValueError:
@@ -381,7 +407,7 @@ class Manejador(BaseHTTPRequestHandler):
 
 def main():
     puerto = int(os.environ.get("PORT", "8020"))
-    print(f"Demo de averías escuchando en el puerto {puerto} · WhatsApp {'conectado' if TOKEN else 'NO configurado (modo consola)'}")
+    print(f"Demo de averías escuchando en el puerto {puerto} · WhatsApp {'conectado' if TOKEN else 'NO configurado (modo consola)'}", flush=True)
     ThreadingHTTPServer(("0.0.0.0", puerto), Manejador).serve_forever()
 
 
